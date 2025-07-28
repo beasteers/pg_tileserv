@@ -21,17 +21,26 @@ import (
 	"github.com/spf13/viper"
 )
 
+// RasterOverview holds overview metadata for rasters
+type RasterOverview struct {
+	TableSchema    string `json:"o_table_schema"`
+	TableName      string `json:"o_table_name"`
+	RasterColumn   string `json:"o_raster_column"`
+	OverviewFactor int    `json:"overview_factor"`
+}
+
 // LayerTable provides metadata about the table layer
 type LayerTable struct {
-	ID             string
-	Schema         string
-	Table          string
-	Description    string
-	Properties     map[string]TableProperty
-	GeometryType   string
-	IDColumn       string
-	GeometryColumn string
-	Srid           int
+	ID              string
+	Schema          string
+	Table           string
+	Description     string
+	Properties      map[string]TableProperty
+	GeometryType    string
+	IDColumn        string
+	GeometryColumn  string
+	Srid            int
+	RasterOverviews []RasterOverview
 }
 
 // TableProperty provides metadata about a single property field,
@@ -245,7 +254,7 @@ func (lyr *LayerTable) getTableDetailJSON(req *http.Request) (TableDetailJSON, e
 		MaxZoom:      viper.GetInt("DefaultMaxZoom"),
 	}
 	// TileURL is relative to server base
-	td.TileURL = fmt.Sprintf("%s/%s/{z}/{x}/{y}.pbf", serverURLBase(req), url.PathEscape(lyr.ID))
+	td.TileURL = fmt.Sprintf("%s/%s/{z}/{x}/{y}.png", serverURLBase(req), url.PathEscape(lyr.ID))
 
 	// Want to add the properties to the Json representation
 	// in table order, which is fiddly
@@ -377,6 +386,21 @@ func (lyr *LayerTable) GetBounds() (Bounds, error) {
 	return bounds, nil
 }
 
+func chooseOverviewFactor(zoom int) int {
+	switch {
+		case zoom <= 7:
+			return 16
+		case zoom <= 11:
+			return 8
+		case zoom <= 13:
+			return 4
+		case zoom <= 15:
+			return 2
+		default:
+			return 1 // base table
+	}
+}
+
 func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, error) {
 
 	type sqlParameters struct {
@@ -386,8 +410,8 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 		TileSrid       int
 		Resolution     int
 		Buffer         int
-		Properties     string
-		MvtParams      string
+		// Properties     string
+		// MvtParams      string
 		Limit          string
 		Schema         string
 		Table          string
@@ -412,22 +436,38 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 	// from the layer SRID in the database
 	tileSrid := tile.Bounds.SRID
 
-	// preserve case and special characters in column names
-	// of SQL query by double quoting names
-	attrNames := make([]string, 0, len(qp.Properties))
-	for _, a := range qp.Properties {
-		attrNames = append(attrNames, fmt.Sprintf("\"%s\"", a))
-	}
+	// // preserve case and special characters in column names
+	// // of SQL query by double quoting names
+	// attrNames := make([]string, 0, len(qp.Properties))
+	// for _, a := range qp.Properties {
+	// 	attrNames = append(attrNames, fmt.Sprintf("\"%s\"", a))
+	// }
 
-	// only specify MVT format parameters we have configured
-	mvtParams := make([]string, 0)
-	mvtParams = append(mvtParams, fmt.Sprintf("'%s', %d", lyr.ID, qp.Resolution))
-	if lyr.GeometryColumn != "" {
-		mvtParams = append(mvtParams, fmt.Sprintf("'%s'", lyr.GeometryColumn))
-	}
-	// The idColumn parameter is PostGIS3+ only
-	if globalPostGISVersion >= 3000000 && lyr.IDColumn != "" {
-		mvtParams = append(mvtParams, fmt.Sprintf("'%s'", lyr.IDColumn))
+	// // only specify MVT format parameters we have configured
+	// mvtParams := make([]string, 0)
+	// mvtParams = append(mvtParams, fmt.Sprintf("'%s', %d", lyr.ID, qp.Resolution))
+	// if lyr.GeometryColumn != "" {
+	// 	mvtParams = append(mvtParams, fmt.Sprintf("'%s'", lyr.GeometryColumn))
+	// }
+	// // The idColumn parameter is PostGIS3+ only
+	// if globalPostGISVersion >= 3000000 && lyr.IDColumn != "" {
+	// 	mvtParams = append(mvtParams, fmt.Sprintf("'%s'", lyr.IDColumn))
+	// }
+
+	// Default zoom level is the base table
+	table := lyr.Table
+	schema := lyr.Schema
+	geometryColumn := lyr.GeometryColumn
+
+	// Check if we have any raster overviews that better match the zoom level
+	targetFactor := chooseOverviewFactor(tile.Zoom)
+	for _, overview := range lyr.RasterOverviews {
+		if overview.OverviewFactor < targetFactor {
+			// We found a matching overview, so we can use it
+			table = overview.TableName
+			schema = overview.TableSchema
+			geometryColumn = overview.RasterColumn
+		}
 	}
 
 	sp := sqlParameters{
@@ -437,11 +477,11 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 		TileSrid:       tileSrid,
 		Resolution:     qp.Resolution,
 		Buffer:         qp.Buffer,
-		Properties:     strings.Join(attrNames, ", "),
-		MvtParams:      strings.Join(mvtParams, ", "),
-		Schema:         lyr.Schema,
-		Table:          lyr.Table,
-		GeometryColumn: lyr.GeometryColumn,
+		// Properties:     strings.Join(attrNames, ", "),
+		// MvtParams:      strings.Join(mvtParams, ", "),
+		Schema:         schema,
+		Table:          table,
+		GeometryColumn: geometryColumn,
 		Srid:           lyr.Srid,
 	}
 
@@ -449,19 +489,12 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 		sp.Limit = fmt.Sprintf("LIMIT %d", qp.Limit)
 	}
 
-	// TODO: Remove ST_Force2D when fixes to line clipping are common
-	// in GEOS. See https://trac.osgeo.org/postgis/ticket/4690
 	tmplSQL := `
-	SELECT ST_AsMVT(mvtgeom, {{ .MvtParams }}) FROM (
-		SELECT ST_AsMVTGeom(
-			ST_Transform(ST_Force2D(t."{{ .GeometryColumn }}"), {{ .TileSrid }}),
-			bounds.geom_clip,
-			{{ .Resolution }},
-			{{ .Buffer }}
+	SELECT ST_AsPNG(ST_Resample(ST_Union(rast."{{ .GeometryColumn }}"), {{ .Resolution }}, {{ .Resolution }})) FROM (
+		SELECT ST_Clip(
+			ST_Transform(t."{{ .GeometryColumn }}", {{ .TileSrid }}),
+			bounds.geom_clip
 		  ) AS "{{ .GeometryColumn }}"
-		  {{ if .Properties }}
-		  , {{ .Properties }}
-		  {{ end }}
 		FROM "{{ .Schema }}"."{{ .Table }}" t, (
 			SELECT {{ .TileSQL }}  AS geom_clip,
 					{{ .QuerySQL }} AS geom_query
@@ -470,7 +503,7 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 							ST_Transform(bounds.geom_query, {{ .Srid }}))
 			{{ .FilterSQL }}
 		{{ .Limit }}
-	) mvtgeom
+	) rast
 	`
 
 	sql, err := renderSQLTemplate("tabletilesql", tmplSQL, sp)
@@ -506,6 +539,19 @@ func getTableLayers() ([]LayerTable, error) {
 		rtrim(postgis_typmod_type(a.atttypmod), 'ZM') AS geometry_type,
 		coalesce(case when it.typname is not null then ia.attname else null end, '') AS id_column,
 		(
+			SELECT json_agg(json_build_object(
+				'o_table_schema', ro.o_table_schema,
+				'o_table_name', ro.o_table_name,
+				'o_raster_column', ro.o_raster_column,
+				'overview_factor', ro.overview_factor
+			))
+			FROM raster_overviews ro
+			WHERE ro.r_table_schema = n.nspname
+			  AND ro.r_table_name = c.relname
+			  AND ro.r_raster_column = a.attname
+			ORDER BY ro.overview_factor DESC
+		) AS raster_overviews,
+		(
 			SELECT array_agg(ARRAY[sa.attname, st.typname, coalesce(da.description,''), sa.attnum::text]::text[] ORDER BY sa.attnum)
 			FROM pg_attribute sa
 			JOIN pg_type st ON sa.atttypid = st.oid
@@ -524,10 +570,10 @@ func getTableLayers() ([]LayerTable, error) {
 	LEFT JOIN pg_attribute ia ON (ia.attrelid = i.indexrelid)
 	LEFT JOIN pg_type it ON (ia.atttypid = it.oid AND it.typname in ('int2', 'int4', 'int8'))
 	WHERE c.relkind IN ('r', 'v', 'm', 'p', 'f')
-		AND t.typname = 'geometry'
+		AND t.typname = 'raster'
 		AND has_table_privilege(c.oid, 'select')
 		AND has_schema_privilege(n.oid, 'usage')
-		AND postgis_typmod_srid(a.atttypmod) > 0
+		-- AND postgis_typmod_srid(a.atttypmod) > 0
 	ORDER BY 1
 	`
 
@@ -549,11 +595,12 @@ func getTableLayers() ([]LayerTable, error) {
 			id, schema, table, description, geometryColumn string
 			srid                                           int
 			geometryType, idColumn                         string
+			rasterOverviews                                pgtype.Json
 			atts                                           pgtype.TextArray
 		)
 
 		err := rows.Scan(&id, &schema, &table, &description, &geometryColumn,
-			&srid, &geometryType, &idColumn, &atts)
+			&srid, &geometryType, &idColumn, &rasterOverviews, &atts)
 		if err != nil {
 			return nil, err
 		}
@@ -583,17 +630,27 @@ func getTableLayers() ([]LayerTable, error) {
 			}
 		}
 
+		// Unmarshal rasterOverviews JSON into slice of RasterOverview
+		var rasterOverviewArray []RasterOverview
+		if rasterOverviews.Status == pgtype.Present && len(rasterOverviews.Bytes) > 0 {
+			err := json.Unmarshal(rasterOverviews.Bytes, &rasterOverviewArray)
+			if err != nil {
+				return nil, fmt.Errorf("unable to parse raster overview metadata: %w", err)
+			}
+		}
+
 		// "schema.tablename" is our unique key for table layers
 		lyr := LayerTable{
-			ID:             id,
-			Schema:         schema,
-			Table:          table,
-			Description:    description,
-			GeometryColumn: geometryColumn,
-			Srid:           srid,
-			GeometryType:   geometryType,
-			IDColumn:       idColumn,
-			Properties:     properties,
+			ID:              id,
+			Schema:          schema,
+			Table:           table,
+			Description:     description,
+			GeometryColumn:  geometryColumn,
+			Srid:            srid,
+			GeometryType:    geometryType,
+			IDColumn:        idColumn,
+			RasterOverviews: rasterOverviewArray,
+			Properties:      properties,
 		}
 
 		layerTables = append(layerTables, lyr)
