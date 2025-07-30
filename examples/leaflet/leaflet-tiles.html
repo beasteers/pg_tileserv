@@ -71,7 +71,8 @@
   // Add raster tile layer
   var rasterServer  = "http://localhost:7800/";
   // var rasterLayerId = "public.geogkey5"; // table name loaded by raster2pgsql
-  var rasterLayerId = "public.precip"; // table name loaded by raster2pgsql
+  // var rasterLayerId = "public.precip"; // table name loaded by raster2pgsql
+  var rasterLayerId = "public.test_raster_tile"; // table name loaded by raster2pgsql
   var rasterUrl     = rasterServer + rasterLayerId + "/{z}/{x}/{y}.png";
   var rasterTileLayer = L.tileLayer(rasterUrl, {
     maxZoom: 18

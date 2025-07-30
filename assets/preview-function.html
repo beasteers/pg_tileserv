@@ -123,101 +123,29 @@
         }
       };
 
-      var paints = {
-        "circle":{
-          "circle-color": mapcolor,
-          "circle-radius": 3
-        },
-        "line":{
-          "line-width": 1.5,
-          "line-color": mapcolor
-        },
-        "fill":{
-          "fill-color": mapcolor,
-          "fill-opacity": 0.1,
-          "fill-outline-color": mapcolor
-        }
-      };
-
       function layerSource(tileurl) {
         return {
-          "type": "vector",
+          "type": "raster",
           "tiles": [tileurl],
+          "tileSize": 256,
           "minzoom": layer["minzoom"],
           "maxzoom": layer["maxzoom"]
         }
       };
 
-      function layerId(id, gtype, paint) {
-        return id+"."+gtype+"."+paint;
-      }
-
-      function layerConfig(id, gtype, paint) {
-        return {
-          "id": layerId(id, gtype, paint),
-          "source": id,
-          // Function-layers implementors will decide on an arbitrary
-          // layer name inside the tile. Most often, they will keep
-          // the name "default" as it is ST_AsMVT() default value
-          // for this parameter.
-          "source-layer": "default",
-          "type": paint,
-          "paint": paints[paint],
-          "filter": ["match", ["geometry-type"], [gtype, "Multi"+gtype], true, false]
-        }
-      };
-
-      // Convert feature properties into html
-      function featureHtml(f) {
-        var p = f.properties;
-        var h = "<p>";
-        for (var k in p) {
-          h += "<b>" + k + ":</b> " + p[k] + "<br/>"
-        }
-        h += "</p>";
-        return h
-      }
-
-      function addLayerBehavior(id) {
-        // When a click event occurs on a feature in the states layer, open a popup at the
-        // location of the click, with description HTML from its properties.
-        map.on('click', id, function(e) {
-          new maplibregl.Popup()
-          .setLngLat(e.lngLat)
-          .setHTML(featureHtml(e.features[0]))
-          .addTo(map);
-        });
-
-        // // Change the cursor to a pointer when the mouse is over the states layer.
-        map.on('mouseenter', id, function() {
-          map.getCanvas().style.cursor = 'pointer';
-        });
-
-        // // Change it back to a pointer when it leaves.
-        map.on('mouseleave', id, function() {
-          map.getCanvas().style.cursor = '';
-        });
-      }
-
       function addFilteredLayers(id, url) {
         map.addSource(id, layerSource(url));
-        // Render as point if point
-        map.addLayer(layerConfig(id, "Point", "circle"));
-        addLayerBehavior(layerId(id, "Point", "circle"));
-        // Render as line if line
-        map.addLayer(layerConfig(id, "LineString", "line"));
-        addLayerBehavior(layerId(id, "LineString", "line"));
-        // Render as area (fill) and line (outline) if polygon
-        map.addLayer(layerConfig(id, "Polygon", "fill"));
-        addLayerBehavior(layerId(id, "Polygon", "fill"));
-        map.addLayer(layerConfig(id, "Polygon", "line"));
+        map.addLayer({
+          "id": id,
+          "type": "raster",
+          "source": id,
+          "minzoom": layer["minzoom"],
+          "maxzoom": layer["maxzoom"]
+        });
       }
 
       function removeFilteredLayers(id) {
-        map.removeLayer(layerId(id, "Point", "circle"));
-        map.removeLayer(layerId(id, "LineString", "line"));
-        map.removeLayer(layerId(id, "Polygon", "fill"));
-        map.removeLayer(layerId(id, "Polygon", "line"));
+        map.removeLayer(id);
         map.removeSource(id);
       }
 
@@ -225,12 +153,7 @@
       map.addControl(new maplibregl.NavigationControl());
 
       map.on("load", function() {
-
         addFilteredLayers(layer["id"], layer["tileurl"]);
-
-
-
-
       });
 
     });

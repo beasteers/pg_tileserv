@@ -469,18 +469,19 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 	schema := lyr.Schema
 	geometryColumn := lyr.GeometryColumn
 
-	// // Check if we have any raster overviews that better match the zoom level
-	// targetFactor := chooseOverviewFactor(tile.Zoom)
-	// for _, overview := range lyr.RasterOverviews {
-	// 	if overview.OverviewFactor < targetFactor {
-	// 		// We found a matching overview, so we can use it
-	// 		table = overview.TableName
-	// 		schema = overview.TableSchema
-	// 		geometryColumn = overview.RasterColumn
-	// 		fmt.Printf("Using raster overview %s.%s.%s with factor %d for zoom %d\n",
-	// 			schema, table, geometryColumn, overview.OverviewFactor, tile.Zoom)
-	// 	}
-	// }
+	// Check if we have any raster overviews that better match the zoom level
+	targetFactor := chooseOverviewFactor(tile.Zoom)
+	for _, overview := range lyr.RasterOverviews {
+		if overview.OverviewFactor < targetFactor {
+			// We found a matching overview, so we can use it
+			table = overview.TableName
+			schema = overview.TableSchema
+			geometryColumn = overview.RasterColumn
+			fmt.Printf("Using raster overview %s.%s.%s with factor %d(target %d) for zoom %d\n",
+				schema, table, geometryColumn, overview.OverviewFactor, targetFactor, tile.Zoom)
+			break
+		}
+	}
 
 	sp := sqlParameters{
 		TileZoom:       tile.Zoom,
@@ -505,50 +506,203 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 	}
 
 	// https://postgis.net/docs/RT_ST_ColorMap.html
+	// Alignment-safe raster tile SQL: ensures proper raster alignment using a base raster from tile envelope and clipping source rasters.
 	tmplSQL := `
 	WITH
-	bounds AS (
-		SELECT ST_SetSRID(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .TileSrid }}) AS env
-	)
-	,rasts AS (
-		SELECT t."{{ .GeometryColumn }}" as "{{ .GeometryColumn }}"
-		FROM "{{ .Schema }}"."{{ .Table }}" t, bounds
-		WHERE
-			ST_Intersects(t."{{ .GeometryColumn }}", ST_Transform(bounds.env, {{ .Srid }}))
-			{{ .FilterSQL }}
-		{{ .Limit }}
-	)
-	,rast AS (
-		SELECT ST_Clip(
-			t."{{ .GeometryColumn }}",
-			ST_Transform(bounds.env, {{ .Srid }})
-		) AS "{{ .GeometryColumn }}"
-		FROM rasts t, bounds
-	)
-	,ref_tile AS (
-    SELECT ST_AddBand(
-      ST_MakeEmptyRaster(
-        256, 256,
-        ST_XMin(env), ST_YMax(env),
-        (ST_XMax(env) - ST_XMin(env)) / 256,
-        (ST_YMax(env) - ST_YMin(env)) / -256,
-        0, 0, {{ .TileSrid }}
-      ),
-      '8BUI'::text, 0, NULL
-    ) AS rast
-    FROM bounds
-  )
-	SELECT
-		ST_AsPNG(ST_ColorMap(
-			ST_Resample(
-				ST_Transform(ST_Union(rast."{{ .GeometryColumn }}"), {{ .TileSrid }}),
-				ref_tile.rast)
-				-- , 256, 256)
-			, 1, 'bluered'
-		)) AS png
-	FROM rast, ref_tile
-	group by ref_tile.rast
+	  bounds AS (
+	    SELECT ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}) AS env
+	  ),
+	  base_tile AS (
+	  	SELECT ST_AddBand(
+		ST_MakeEmptyRaster(
+			{{ .Resolution }}, {{ .Resolution }},
+			ST_XMin(env), ST_YMax(env),
+			(ST_XMax(env) - ST_XMin(env)) / ({{ .Resolution }}),
+			(ST_YMax(env) - ST_YMin(env)) / -({{ .Resolution }}),
+			0, 0, {{ .Srid }}
+		),
+		'8BUI'::text, 0, NULL
+		) AS rast
+	    FROM bounds
+	  ),
+	  base_ext AS (
+	  	SELECT ST_SetSrid(ST_Extent(ST_Envelope(base_tile.rast)), {{ .Srid }}) AS env FROM base_tile
+	  ),
+	  clipped AS (
+	    SELECT
+			ST_Clip(t."{{ .GeometryColumn }}", ST_Buffer(bounds.env, 2*(ST_XMax(env) - ST_XMin(env)) / ({{ .Resolution }})), touched => true)
+			--ST_Clip(t."{{ .GeometryColumn }}", bounds.env, touched => true)
+			-- t."{{ .GeometryColumn }}"
+			AS rast
+	    FROM "{{ .Schema }}"."{{ .Table }}" t, base_ext bounds
+	    WHERE ST_Intersects(t."{{ .GeometryColumn }}", bounds.env)
+	    {{ .FilterSQL }}
+	    {{ .Limit }}
+	  ),
+	  padded AS (
+	    SELECT ST_Union(rast) AS rast FROM (
+			SELECT rast FROM base_tile
+			UNION ALL
+			SELECT ST_Resample(clipped.rast, base_tile.rast) as rast FROM clipped, base_tile
+		)
+	  )
+	SELECT ST_AsPNG(
+		-- rast
+		ST_Clip(rast, bounds.env, touched => true)
+		-- ST_ColorMap(rast, 1, 'bluered')
+	) FROM padded, bounds;
 	`
+
+
+	// tmplSQL := `
+	// WITH
+	// bounds AS (
+	// 	SELECT
+	// 		ST_Transform(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .Srid }}) as env,
+	// 		ST_Transform(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .Srid }}) AS geom_clip
+	// )
+	// ,rasts AS (
+	// 	SELECT ST_AddBand(
+	// 	ST_MakeEmptyRaster(
+	// 		256, 256,
+	// 		ST_XMin(env), ST_YMax(env),
+	// 		(ST_XMax(env) - ST_XMin(env)) / 256,
+	// 		(ST_YMax(env) - ST_YMin(env)) / -256,
+	// 		0, 0, {{ .Srid }}
+	// 	),
+	// 	'8BUI'::text, 0, NULL
+	// 	) AS "{{ .GeometryColumn }}"
+	// 	FROM bounds
+	// 	UNION ALL
+	// 	SELECT ST_Clip(
+	// 		t."{{ .GeometryColumn }}",
+	// 		bounds.geom_clip,
+	// 		touched => true
+	// 	) as "{{ .GeometryColumn }}"
+	// 	FROM "{{ .Schema }}"."{{ .Table }}" t, bounds
+	// 	WHERE
+	// 		ST_Intersects(t."{{ .GeometryColumn }}", bounds.geom_clip)
+	// 		{{ .FilterSQL }}
+	// 	{{ .Limit }}
+	// )
+	// -- ,ref_tile AS (
+    // -- SELECT ST_AddBand(
+	// -- 	ST_MakeEmptyRaster(
+	// -- 		256, 256,
+	// -- 		ST_XMin(env), ST_YMax(env),
+	// -- 		(ST_XMax(env) - ST_XMin(env)) / 256,
+	// -- 		(ST_YMax(env) - ST_YMin(env)) / -256,
+	// -- 		0, 0, {{ .Srid }}
+	// -- 	),
+	// -- 	'8BUI'::text, 0, NULL
+	// -- 	) AS rast
+	// -- 	FROM bounds
+	// -- )
+	// SELECT
+	// 	ST_AsPNG(
+	// 		ST_ColorMap(
+	// 		-- ST_Resample(
+	// 			ST_Union(rasts."{{ .GeometryColumn }}")
+	// 		-- , ref_tile.rast)
+	// 		, 1, 'bluered')
+	// 	) AS png
+	// FROM rasts
+	// -- ,ref_tile
+	// -- group by ref_tile.rast
+	// `
+	// tmplSQL := `
+	// WITH
+	// bounds AS (
+	// 	SELECT ST_SetSRID(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .TileSrid }}) as env
+	// )
+	// ,rasts AS (
+	// 	SELECT t."{{ .GeometryColumn }}" as "{{ .GeometryColumn }}"
+	// 	FROM "{{ .Schema }}"."{{ .Table }}" t, bounds
+	// 	WHERE
+	// 		ST_Intersects(t."{{ .GeometryColumn }}", ST_Transform(bounds.env, {{ .Srid }}))
+	// 		{{ .FilterSQL }}
+	// 	{{ .Limit }}
+	// )
+	// ,rast AS (
+	// 	SELECT ST_Clip(
+	// 		t."{{ .GeometryColumn }}",
+	// 		ST_Transform(bounds.env, {{ .Srid }})
+	// 	) AS "{{ .GeometryColumn }}"
+	// 	FROM rasts t, bounds
+	// )
+	// ,ref_tile AS (
+    // SELECT ST_AddBand(
+	// 	ST_MakeEmptyRaster(
+	// 		256, 256,
+	// 		ST_XMin(env), ST_YMax(env),
+	// 		(ST_XMax(env) - ST_XMin(env)) / 256,
+	// 		(ST_YMax(env) - ST_YMin(env)) / -256,
+	// 		0, 0, {{ .TileSrid }}
+	// 	),
+	// 	'8BUI'::text, 0, NULL
+	// 	) AS rast
+	// 	FROM bounds
+	// )
+	// SELECT
+	// 	ST_AsPNG(ST_ColorMap(
+	// 		ST_Resample(
+	// 			ST_Transform(ST_Union(rast."{{ .GeometryColumn }}"), {{ .TileSrid }})
+	// 			, ref_tile.rast)
+	// 			-- , 256, 256)
+	// 		, 1, 'bluered'
+	// 	)) AS png
+	// FROM rast
+	// , ref_tile
+	// group by ref_tile.rast
+	// `
+
+	// tmplSQL := `
+	// WITH
+	// bounds AS (
+	// 	SELECT ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}) as env
+	// 	-- ST_SetSRID(, {{ .TileSrid }}) AS env
+	// )
+	// ,rasts AS (
+	// 	SELECT t."{{ .GeometryColumn }}" as "{{ .GeometryColumn }}"
+	// 	FROM "{{ .Schema }}"."{{ .Table }}" t, bounds
+	// 	WHERE
+	// 		ST_Intersects(t."{{ .GeometryColumn }}", ST_Transform(bounds.env, {{ .Srid }}))
+	// 		{{ .FilterSQL }}
+	// 	{{ .Limit }}
+	// )
+	// ,rast AS (
+	// 	SELECT ST_Clip(
+	// 		t."{{ .GeometryColumn }}",
+	// 		ST_Transform(bounds.env, {{ .Srid }}),
+	// 		false
+	// 	) AS "{{ .GeometryColumn }}"
+	// 	FROM rasts t, bounds
+	// )
+	// -- ,ref_tile AS (
+    // -- SELECT ST_AddBand(
+	// -- 	ST_MakeEmptyRaster(
+	// -- 		256, 256,
+	// -- 		ST_XMin(env), ST_YMax(env),
+	// -- 		(ST_XMax(env) - ST_XMin(env)) / 256,
+	// -- 		(ST_YMax(env) - ST_YMin(env)) / -256,
+	// -- 		0, 0, {{ .TileSrid }}
+	// -- 	),
+	// -- 	'8BUI'::text, 0, NULL
+	// -- 	) AS rast
+	// -- 	FROM bounds
+	// -- )
+	// SELECT
+	// 	ST_AsPNG(ST_ColorMap(
+	// 		-- ST_Resample(
+	// 			ST_Transform(ST_Union(rast."{{ .GeometryColumn }}"), {{ .TileSrid }})
+	// 			-- , ref_tile.rast)
+	// 			-- , 256, 256)
+	// 		, 1, 'bluered'
+	// 	)) AS png
+	// FROM rast
+	// -- , ref_tile
+	// -- group by ref_tile.rast
+	// `
 	// tmplSQL := `
 	// 	WITH bounds AS (
 	// 	SELECT ST_Transform(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .Srid }}) AS geom
@@ -591,7 +745,7 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 	// 	{{ .Limit }}
 	// ) rast
 	sql, err := renderSQLTemplate("tabletilesql", tmplSQL, sp)
-	fmt.Printf("Table SQL: %s\n", sql)
+	// fmt.Printf("Table SQL: %s\n", sql)
 	if err != nil {
 		return "", err
 	}

@@ -161,7 +161,7 @@ func (lyr *LayerFunction) getFunctionDetailJSON(req *http.Request) (FunctionDeta
 		MaxZoom:     viper.GetInt("DefaultMaxZoom"),
 	}
 	// TileURL is relative to server base
-	td.TileURL = fmt.Sprintf("%s/%s/{z}/{x}/{y}.pbf", serverURLBase(req), url.PathEscape(lyr.ID))
+	td.TileURL = fmt.Sprintf("%s/%s/{z}/{x}/{y}.png", serverURLBase(req), url.PathEscape(lyr.ID))
 
 	tmpMap := make(map[int]FunctionArgument)
 	tmpKeys := make([]int, 0, len(lyr.Arguments))

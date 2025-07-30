@@ -23,15 +23,22 @@ services:
 
     ports:
       - 7800:7800
+    expose:
+      - '7800'
 
   pg_rasterserv_db:
-    image: postgis/postgis:13-3.0-alpine
+    image: postgis/postgis:16-3.5
+    platform: linux/amd64
 
     container_name: pg_rasterserv_db
 
     volumes:
       - ./data:/work
-      - pg_rasterserv_db:/var/lib/postgresql/data
+      - ./db:/var/lib/postgresql/data
+
+    environment:
+      POSTGIS_ENABLE_OUTDB_RASTERS: "1"
+      POSTGIS_GDAL_ENABLED_DRIVERS: "ENABLE_ALL"
 
     env_file:
       - pg.env
@@ -47,5 +54,17 @@ services:
     ports:
       - 8080:80
 
-volumes:
-  pg_rasterserv_db:
+  varnish:
+    image: varnish:stable
+    container_name: pg_rasterserv_cache
+    depends_on:
+      - pg_rasterserv
+    ports:
+      - "7801:80"
+    volumes:
+      - "./default.vcl:/etc/varnish/default.vcl"
+    tmpfs:
+      - /var/lib/varnish/varnishd:exec
+    command: >
+      -s malloc,256M -s file,/var/lib/varnish/diskcache,2G
+    restart: unless-stopped
