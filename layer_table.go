@@ -284,6 +284,7 @@ func (lyr *LayerTable) getTableDetailJSON(req *http.Request) (TableDetailJSON, e
 	return td, nil
 }
 
+// https://gist.github.com/kubaszostak/c22a5bb10fe42cbf067c795d9729864e
 // GetBoundsExact returns the data coverage extent for a table layer
 // in EPSG:4326, clipped to (+/-180, +/-90)
 func (lyr *LayerTable) GetBoundsExact() (Bounds, error) {
@@ -291,10 +292,12 @@ func (lyr *LayerTable) GetBoundsExact() (Bounds, error) {
 	extentSQL := fmt.Sprintf(`
 	WITH ext AS (
 		SELECT
-			coalesce(
-				ST_Transform(ST_SetSRID(ST_Extent("%s"), %d), 4326),
-				ST_MakeEnvelope(-180, -90, 180, 90, 4326)
-			) AS geom
+			ST_Transform(
+				COALESCE(
+					ST_SetSRID(ST_Envelope(ST_Extent(ST_Envelope("%s"))), %d),
+					ST_MakeEnvelope(-180, -90, 180, 90, 4326)
+				),
+			4326) AS geom
 		FROM "%s"."%s"
 	)
 	SELECT
@@ -337,7 +340,11 @@ func (lyr *LayerTable) GetBounds() (Bounds, error) {
 	bounds := Bounds{}
 	extentSQL := fmt.Sprintf(`
 		WITH ext AS (
-			SELECT ST_Transform(ST_SetSRID(ST_EstimatedExtent('%s', '%s', '%s'), %d), 4326) AS geom
+			SELECT ST_Transform(ST_SetSRID(extent, %d), 4326) AS geom
+			FROM public.raster_columns
+			WHERE r_table_schema = '%s'
+			  AND r_table_name = '%s'
+			  AND r_raster_column = '%s'
 		)
 		SELECT
 			ST_XMin(ext.geom) AS xmin,
@@ -345,7 +352,7 @@ func (lyr *LayerTable) GetBounds() (Bounds, error) {
 			ST_XMax(ext.geom) AS xmax,
 			ST_YMax(ext.geom) AS ymax
 		FROM ext
-		`, lyr.Schema, lyr.Table, lyr.GeometryColumn, lyr.Srid)
+		`, lyr.Srid, lyr.Schema, lyr.Table, lyr.GeometryColumn)
 
 	db, err := dbConnect()
 	if err != nil {
@@ -404,6 +411,9 @@ func chooseOverviewFactor(zoom int) int {
 func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, error) {
 
 	type sqlParameters struct {
+		TileZoom       int
+		TileX         int
+		TileY         int
 		TileSQL        string
 		QuerySQL       string
 		FilterSQL      string
@@ -423,7 +433,7 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 	// expanded version for querying
 	tileBounds := tile.Bounds
 	queryBounds := tile.Bounds
-	queryBounds.Expand(tile.width() * float64(qp.Buffer) / float64(qp.Resolution))
+	// queryBounds.Expand(tile.width() * float64(qp.Buffer) / float64(qp.Resolution))
 	tileSQL := tileBounds.SQL()
 	tileQuerySQL := queryBounds.SQL()
 
@@ -459,18 +469,23 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 	schema := lyr.Schema
 	geometryColumn := lyr.GeometryColumn
 
-	// Check if we have any raster overviews that better match the zoom level
-	targetFactor := chooseOverviewFactor(tile.Zoom)
-	for _, overview := range lyr.RasterOverviews {
-		if overview.OverviewFactor < targetFactor {
-			// We found a matching overview, so we can use it
-			table = overview.TableName
-			schema = overview.TableSchema
-			geometryColumn = overview.RasterColumn
-		}
-	}
+	// // Check if we have any raster overviews that better match the zoom level
+	// targetFactor := chooseOverviewFactor(tile.Zoom)
+	// for _, overview := range lyr.RasterOverviews {
+	// 	if overview.OverviewFactor < targetFactor {
+	// 		// We found a matching overview, so we can use it
+	// 		table = overview.TableName
+	// 		schema = overview.TableSchema
+	// 		geometryColumn = overview.RasterColumn
+	// 		fmt.Printf("Using raster overview %s.%s.%s with factor %d for zoom %d\n",
+	// 			schema, table, geometryColumn, overview.OverviewFactor, tile.Zoom)
+	// 	}
+	// }
 
 	sp := sqlParameters{
+		TileZoom:       tile.Zoom,
+		TileX:         tile.X,
+		TileY:         tile.Y,
 		TileSQL:        tileSQL,
 		QuerySQL:       tileQuerySQL,
 		FilterSQL:      filterSQL,
@@ -489,24 +504,94 @@ func (lyr *LayerTable) requestSQL(tile *Tile, qp *queryParameters) (string, erro
 		sp.Limit = fmt.Sprintf("LIMIT %d", qp.Limit)
 	}
 
+	// https://postgis.net/docs/RT_ST_ColorMap.html
 	tmplSQL := `
-	SELECT ST_AsPNG(ST_Resample(ST_Union(rast."{{ .GeometryColumn }}"), {{ .Resolution }}, {{ .Resolution }})) FROM (
-		SELECT ST_Clip(
-			ST_Transform(t."{{ .GeometryColumn }}", {{ .TileSrid }}),
-			bounds.geom_clip
-		  ) AS "{{ .GeometryColumn }}"
-		FROM "{{ .Schema }}"."{{ .Table }}" t, (
-			SELECT {{ .TileSQL }}  AS geom_clip,
-					{{ .QuerySQL }} AS geom_query
-			) bounds
-		WHERE ST_Intersects(t."{{ .GeometryColumn }}",
-							ST_Transform(bounds.geom_query, {{ .Srid }}))
+	WITH
+	bounds AS (
+		SELECT ST_SetSRID(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .TileSrid }}) AS env
+	)
+	,rasts AS (
+		SELECT t."{{ .GeometryColumn }}" as "{{ .GeometryColumn }}"
+		FROM "{{ .Schema }}"."{{ .Table }}" t, bounds
+		WHERE
+			ST_Intersects(t."{{ .GeometryColumn }}", ST_Transform(bounds.env, {{ .Srid }}))
 			{{ .FilterSQL }}
 		{{ .Limit }}
-	) rast
+	)
+	,rast AS (
+		SELECT ST_Clip(
+			t."{{ .GeometryColumn }}",
+			ST_Transform(bounds.env, {{ .Srid }})
+		) AS "{{ .GeometryColumn }}"
+		FROM rasts t, bounds
+	)
+	,ref_tile AS (
+    SELECT ST_AddBand(
+      ST_MakeEmptyRaster(
+        256, 256,
+        ST_XMin(env), ST_YMax(env),
+        (ST_XMax(env) - ST_XMin(env)) / 256,
+        (ST_YMax(env) - ST_YMin(env)) / -256,
+        0, 0, {{ .TileSrid }}
+      ),
+      '8BUI'::text, 0, NULL
+    ) AS rast
+    FROM bounds
+  )
+	SELECT
+		ST_AsPNG(ST_ColorMap(
+			ST_Resample(
+				ST_Transform(ST_Union(rast."{{ .GeometryColumn }}"), {{ .TileSrid }}),
+				ref_tile.rast)
+				-- , 256, 256)
+			, 1, 'bluered'
+		)) AS png
+	FROM rast, ref_tile
+	group by ref_tile.rast
 	`
-
+	// tmplSQL := `
+	// 	WITH bounds AS (
+	// 	SELECT ST_Transform(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .Srid }}) AS geom
+	// 	)
+	// 	SELECT ST_AsPNG(ST_ColorMap(
+	// 		ST_Clip(
+	// 			ST_SnapToGrid(ST_Union(r."{{ .GeometryColumn }}"), 0.1, 0.1, -180, 90),
+	// 			b.geom,
+	// 			true
+	// 		), 1, 'bluered')
+	// 	)
+	// 	FROM "{{ .Schema }}"."{{ .Table }}" r, bounds b
+	// 	WHERE ST_Intersects(r."{{ .GeometryColumn }}", b.geom)
+	// 	GROUP BY b.geom;
+	// `
+	// SELECT
+	// 	ST_AsPNG(ST_ColorMap(
+	// 		ST_Resample(
+	// 		ST_Union(rast."{{ .GeometryColumn }}"),
+	// 		ST_AddBand(ST_MakeEmptyRaster(256, 256,
+	// 			ST_XMin(rast.geom_envelope), ST_YMax(rast.geom_envelope),
+	// 			(ST_XMax(rast.geom_envelope) - ST_XMin(rast.geom_envelope)) / 256,
+	// 			(ST_YMax(rast.geom_envelope) - ST_YMin(rast.geom_envelope)) / -256,
+	// 			0, 0, {{ .Srid }}
+	// 		), '8BUI'::text, 0, NULL))
+	// 	, 1, 'bluered'))
+	// FROM (
+	// 	SELECT ST_Clip(
+	// 		t."{{ .GeometryColumn }}",
+	// 		bounds.geom_envelope
+	// 	  ) AS "{{ .GeometryColumn }}",
+	// 	  bounds.geom_envelope
+	// 	FROM "{{ .Schema }}"."{{ .Table }}" t, (
+	// 		SELECT
+	// 			ST_Transform(ST_TileEnvelope({{ .TileZoom }}, {{ .TileX }}, {{ .TileY }}), {{ .Srid }}) AS geom_envelope
+	// 		) bounds
+	// 	WHERE
+	// 		ST_Intersects(t."{{ .GeometryColumn }}", bounds.geom_envelope)
+	// 		{{ .FilterSQL }}
+	// 	{{ .Limit }}
+	// ) rast
 	sql, err := renderSQLTemplate("tabletilesql", tmplSQL, sp)
+	fmt.Printf("Table SQL: %s\n", sql)
 	if err != nil {
 		return "", err
 	}
@@ -535,7 +620,7 @@ func getTableLayers() ([]LayerTable, error) {
 		c.relname AS table,
 		coalesce(d.description, '') AS description,
 		a.attname AS geometry_column,
-		postgis_typmod_srid(a.atttypmod) AS srid,
+		COALESCE(rc.srid, 0) AS srid,
 		rtrim(postgis_typmod_type(a.atttypmod), 'ZM') AS geometry_type,
 		coalesce(case when it.typname is not null then ia.attname else null end, '') AS id_column,
 		(
@@ -544,12 +629,11 @@ func getTableLayers() ([]LayerTable, error) {
 				'o_table_name', ro.o_table_name,
 				'o_raster_column', ro.o_raster_column,
 				'overview_factor', ro.overview_factor
-			))
+			) ORDER BY ro.overview_factor DESC)
 			FROM raster_overviews ro
 			WHERE ro.r_table_schema = n.nspname
 			  AND ro.r_table_name = c.relname
 			  AND ro.r_raster_column = a.attname
-			ORDER BY ro.overview_factor DESC
 		) AS raster_overviews,
 		(
 			SELECT array_agg(ARRAY[sa.attname, st.typname, coalesce(da.description,''), sa.attnum::text]::text[] ORDER BY sa.attnum)
@@ -569,6 +653,9 @@ func getTableLayers() ([]LayerTable, error) {
 	LEFT JOIN pg_index i ON (c.oid = i.indrelid AND i.indisprimary AND i.indnatts = 1)
 	LEFT JOIN pg_attribute ia ON (ia.attrelid = i.indexrelid)
 	LEFT JOIN pg_type it ON (ia.atttypid = it.oid AND it.typname in ('int2', 'int4', 'int8'))
+	LEFT JOIN raster_columns rc ON rc.r_table_schema = n.nspname
+                               AND rc.r_table_name = c.relname
+                               AND rc.r_raster_column = a.attname
 	WHERE c.relkind IN ('r', 'v', 'm', 'p', 'f')
 		AND t.typname = 'raster'
 		AND has_table_privilege(c.oid, 'select')
@@ -595,7 +682,7 @@ func getTableLayers() ([]LayerTable, error) {
 			id, schema, table, description, geometryColumn string
 			srid                                           int
 			geometryType, idColumn                         string
-			rasterOverviews                                pgtype.Json
+			rasterOverviews                                pgtype.JSON
 			atts                                           pgtype.TextArray
 		)
 

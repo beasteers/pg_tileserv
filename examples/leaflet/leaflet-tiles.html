@@ -68,29 +68,15 @@
   });
   baseLayer.addTo(map);
 
-  // Add the tile layer to the map
-  // https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/50m/cultural/ne_50m_admin_0_countries.zip
-  var vectorServer = "http://localhost:7800/";
-  var vectorLayerId = "public.ne_50m_admin_0_countries";
-  var vectorUrl = vectorServer + vectorLayerId + "/{z}/{x}/{y}.pbf";
-  console.log("Reading tiles from " + vectorUrl);
-  var vectorTileStyling = {};
-  var vectorTileColor = "green";
-  vectorTileStyling[vectorLayerId] = {
-    "fill": true,
-    "fillColor": vectorTileColor,
-    "fillOpacity": 0.1,
-    "color": vectorTileColor,
-    "opacity": 0.7,
-    "weight": 2
-  };
-  var vectorTileOptions = {
-    "rendererFactory": L.canvas.tile,
-    "attribution": "&copy; <a href='http://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors, made with Natural Earth",
-    "vectorTileLayerStyles": vectorTileStyling
-  };
-  var vectorLayer = L.vectorGrid.protobuf(vectorUrl, vectorTileOptions).addTo(map);
-
+  // Add raster tile layer
+  var rasterServer  = "http://localhost:7800/";
+  // var rasterLayerId = "public.geogkey5"; // table name loaded by raster2pgsql
+  var rasterLayerId = "public.precip"; // table name loaded by raster2pgsql
+  var rasterUrl     = rasterServer + rasterLayerId + "/{z}/{x}/{y}.png";
+  var rasterTileLayer = L.tileLayer(rasterUrl, {
+    maxZoom: 18
+  });
+  rasterTileLayer.addTo(map);
 </script>
 
 </body>

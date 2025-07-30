@@ -11,9 +11,11 @@ ARG TARGETARCH
 ARG VERSION
 
 WORKDIR /app
+COPY go.mod go.sum ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go mod download
 COPY . ./
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -v -ldflags "-s -w -X main.programVersion=${VERSION}"
+RUN --mount=type=cache,target="/root/.cache/go-build" GOCACHE=/root/.cache/go-build CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -v -ldflags "-s -w -X main.programVersion=${VERSION}"
 
 FROM --platform=${TARGETARCH} ${BASE_REGISTRY}/${BASE_IMAGE} AS multi-stage
 

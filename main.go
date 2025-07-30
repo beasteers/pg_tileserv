@@ -38,7 +38,7 @@ import (
 )
 
 // programName is the name string we use
-const programName string = "pg_tileserv"
+const programName string = "pg_rasterserv"
 
 // programVersion is the version string we use
 // const programVersion string = "0.1"
@@ -77,8 +77,8 @@ func init() {
 	viper.SetDefault("TlsServerCertificateFile", "")
 	viper.SetDefault("TlsServerPrivateKeyFile", "")
 	viper.SetDefault("UrlBase", "")
-	viper.SetDefault("DefaultResolution", 4096)
-	viper.SetDefault("DefaultBuffer", 256)
+	viper.SetDefault("DefaultResolution", 256)
+	viper.SetDefault("DefaultBuffer", 0)
 	viper.SetDefault("MaxFeaturesPerTile", 50000)
 	viper.SetDefault("DefaultMinZoom", 0)
 	viper.SetDefault("DefaultMaxZoom", 22)
@@ -88,7 +88,7 @@ func init() {
 	// 1d, 1h, 1m, 1s, see https://golang.org/pkg/time/#ParseDuration
 	viper.SetDefault("DbPoolMaxConnLifeTime", "1h")
 	viper.SetDefault("DbPoolMaxConns", 4)
-	viper.SetDefault("DbTimeout", 10)
+	viper.SetDefault("DbTimeout", 20)
 	viper.SetDefault("CORSOrigins", []string{"*"})
 	viper.SetDefault("BasePath", "/")
 	viper.SetDefault("CacheTTL", 0)          // cache timeout in seconds
@@ -394,7 +394,10 @@ func requestTiles(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
-	w.Header().Add("Content-Type", "application/vnd.mapbox-vector-tile")
+	// w.Header().Add("Content-Type", "application/vnd.mapbox-vector-tile")
+	// png mime type
+	w.Header().Add("Content-Type", "image/png")
+
 
 	if _, errWrite := w.Write(layers); errWrite != nil {
 		return errWrite

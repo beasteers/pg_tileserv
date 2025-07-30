@@ -18,4 +18,4 @@ do
 done
 
 # Remove the DB Volume, removes database
-docker volume rm docker_pg_tileserv_db
+docker volume rm docker_pg_rasterserv_db
