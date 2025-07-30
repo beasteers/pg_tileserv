@@ -38,7 +38,7 @@ import (
 )
 
 // programName is the name string we use
-const programName string = "pg_rasterserv"
+const programName string = "pg_tileserv"
 
 // programVersion is the version string we use
 // const programVersion string = "0.1"
@@ -88,7 +88,7 @@ func init() {
 	// 1d, 1h, 1m, 1s, see https://golang.org/pkg/time/#ParseDuration
 	viper.SetDefault("DbPoolMaxConnLifeTime", "1h")
 	viper.SetDefault("DbPoolMaxConns", 4)
-	viper.SetDefault("DbTimeout", 20)
+	viper.SetDefault("DbTimeout", 10)
 	viper.SetDefault("CORSOrigins", []string{"*"})
 	viper.SetDefault("BasePath", "/")
 	viper.SetDefault("CacheTTL", 0)          // cache timeout in seconds

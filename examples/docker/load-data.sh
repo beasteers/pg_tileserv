@@ -2,11 +2,6 @@
 # NB the docker-compose stack must be running !
 #
 
-# Create overviews for the raster data
-docker-compose exec pg_rasterserv_db sh -c \
-  "psql -U tileserv -d tileserv \
-  -c \"CREATE EXTENSION postgis_raster;ALTER SYSTEM SET postgis.gdal_enabled_drivers TO 'ENABLE_ALL';SELECT pg_reload_conf();\""
-
 # # Load Admin 0 countries
 # docker-compose exec pg_tileserv_db sh -c "shp2pgsql -D -s 4326 /work/ne_50m_admin_0_countries.shp | psql -U tileserv -d tileserv"
 
@@ -39,38 +34,45 @@ gdalwarp \
   -co COMPRESS=DEFLATE \
   gpm_1d.20250714.tif gpm_1d.20250714_3857.tif
 
+
+# Create overviews for the raster data
+docker-compose exec pg_tileserv_db sh -c \
+  "psql -U tileserv -d tileserv \
+  -c \"CREATE EXTENSION postgis_raster;ALTER SYSTEM SET postgis.gdal_enabled_drivers TO 'ENABLE_ALL';SELECT pg_reload_conf();\""
+
+
 # "https://s3.eu-central-1.wasabisys.com/openlandmap/predicted1km/pnv_fapar_proba.v.annual_d_1km_s0..0cm_2014..2017_v0.1.tif"
 
 # enable PostGIS raster extension
-docker-compose exec pg_rasterserv_db \
+docker-compose exec pg_tileserv_db \
   psql -U tileserv -d tileserv \
   -c "CREATE EXTENSION IF NOT EXISTS postgis_raster;"
 
 # Load sample raster data (GeoTIFF)
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
   "raster2pgsql -s 4326 -C -I /work/GeogToWGS84GeoKey5.tif geogkey5 \
     | psql -U tileserv -d tileserv"
 
 # Load sample raster data (GeoTIFF)
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
     "raster2pgsql -s 3031 -C -I /work/nt_20201024_f18_nrt_s_8.tif sea_ice \
     | psql -U tileserv -d tileserv"
 
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
     "raster2pgsql -s 3857 -C -I -P -t 512x512 work/gpm_1d.20250714_3857.tif precip \
     | psql -U tileserv -d tileserv"
 
 # Create overviews for the raster data
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
   "psql -U tileserv -d tileserv \
   -c \"SELECT ST_CreateOverview('public.precip'::regclass, 'rast', 2);\""
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
   "psql -U tileserv -d tileserv \
   -c \"SELECT ST_CreateOverview('public.precip'::regclass, 'rast', 4);\""
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
   "psql -U tileserv -d tileserv \
   -c \"SELECT ST_CreateOverview('public.precip'::regclass, 'rast', 8);\""
-docker-compose exec pg_rasterserv_db sh -c \
+docker-compose exec pg_tileserv_db sh -c \
   "psql -U tileserv -d tileserv \
   -c \"SELECT ST_CreateOverview('public.precip'::regclass, 'rast', 16);\""
 

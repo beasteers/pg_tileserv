@@ -5,32 +5,32 @@
 version: "3"
 
 services:
-  pg_rasterserv:
-    image: pramsey/pg_rasterserv:latest-alpine-3.12
+  pg_tileserv:
+    image: pramsey/pg_tileserv:latest-alpine-3.12
     build:
       context: ../..
       dockerfile: Dockerfile.alpine
       args:
         VERSION: latest-alpine-3.12
 
-    container_name: pg_rasterserv
+    container_name: pg_tileserv
 
     env_file:
-      - pg_rasterserv.env
+      - pg_tileserv.env
 
     depends_on:
-      - pg_rasterserv_db
+      - pg_tileserv_db
 
     ports:
       - 7800:7800
     expose:
       - '7800'
 
-  pg_rasterserv_db:
+  pg_tileserv_db:
     image: postgis/postgis:16-3.5
     platform: linux/amd64
 
-    container_name: pg_rasterserv_db
+    container_name: pg_tileserv_db
 
     volumes:
       - ./data:/work
@@ -56,9 +56,9 @@ services:
 
   varnish:
     image: varnish:stable
-    container_name: pg_rasterserv_cache
+    container_name: pg_tileserv_cache
     depends_on:
-      - pg_rasterserv
+      - pg_tileserv
     ports:
       - "7801:80"
     volumes:
